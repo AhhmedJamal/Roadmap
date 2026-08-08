@@ -378,7 +378,7 @@
     width:100%;
     max-height: 86vh;
     overflow-y:auto;
-    padding: 30px 32px 28px;
+    padding: 18px;
     box-shadow: 0 20px 60px rgba(0,0,0,0.5);
     animation: modalIn .18s ease;
     direction: rtl;
@@ -657,6 +657,7 @@
     </div>
     <button class="btn" id="expandAllBtn">EXPAND ALL</button>
     <button class="btn" id="collapseAllBtn">COLLAPSE ALL</button>
+    <button class="btn" id="githubBtn">⇅ GITHUB SYNC</button>
     <button class="btn" id="resetBtn" style="color:var(--laravel); border-color:rgba(255,91,69,0.3);">RESET PROGRESS</button>
   </div>
   <div class="overall-progress" id="overallProgress"></div>
@@ -679,6 +680,46 @@
       <div class="modal-title" id="modalTitle"></div>
     </div>
     <div class="modal-body" id="modalBody"></div>
+  </div>
+</div>
+
+<div class="modal-overlay" id="githubOverlay">
+  <div class="modal-card" role="dialog" aria-modal="true" style="direction:rtl;">
+    <div class="modal-head">
+      <div class="modal-head-actions">
+        <button class="modal-close" id="githubClose" aria-label="إغلاق">✕</button>
+      </div>
+      <div class="modal-title">GitHub Sync</div>
+    </div>
+    <div class="modal-body">
+      <div class="edit-form">
+        <div class="edit-field">
+          <label>Repo (owner/repo)</label>
+          <input type="text" id="ghRepo" class="code-input" placeholder="momenwael/roadmap-notes" autocomplete="off">
+        </div>
+        <div class="edit-field">
+          <label>مسار الملف جوه الريبو</label>
+          <input type="text" id="ghPath" class="code-input" placeholder="php-laravel-edits.json" autocomplete="off">
+        </div>
+        <div class="edit-field">
+          <label>Branch</label>
+          <input type="text" id="ghBranch" class="code-input" placeholder="main" autocomplete="off">
+        </div>
+        <div class="edit-field">
+          <label>Personal Access Token</label>
+          <input type="password" id="ghToken" class="code-input" placeholder="ghp_xxxxxxxxxxxx" autocomplete="off">
+          <div class="hint">التوكن بيتخزن في المتصفح بتاعك بس (localStorage)، ومبيتبعتش لأي حتة غير GitHub API مباشرة. استخدم fine-grained token بصلاحية Contents: Read & Write على الريبو ده بس.</div>
+        </div>
+        <div class="edit-actions">
+          <button class="edit-save-btn" id="ghSaveSettingsBtn">حفظ الإعدادات</button>
+        </div>
+        <div id="ghStatus" style="margin-top:14px; font-family:'JetBrains Mono', monospace; font-size:12px; color:var(--text-faint); min-height:16px;"></div>
+        <div class="edit-actions" style="margin-top:6px;">
+          <button class="edit-save-btn" id="ghPushBtn" style="background:var(--stage2);">⇧ ادفع تعديلاتي لـ GitHub</button>
+          <button class="edit-reset-btn" id="ghPullBtn" style="color:var(--stage2); border-color:rgba(192,132,232,0.3);">⇩ اسحب من GitHub</button>
+        </div>
+      </div>
+    </div>
   </div>
 </div>
 
@@ -1180,6 +1221,138 @@ document.getElementById('resetBtn').addEventListener('click', () => {
   document.querySelectorAll('.node-row.done').forEach(r => r.classList.remove('done'));
   updateAllProgress();
 });
+
+// ---- GITHUB SYNC ----
+const GH_CONFIG_KEY = 'phpLaravelRoadmapGithubConfig_v1';
+const githubOverlay = document.getElementById('githubOverlay');
+const ghStatus = document.getElementById('ghStatus');
+
+function loadGhConfig(){
+  try{ return JSON.parse(localStorage.getItem(GH_CONFIG_KEY) || '{}'); }
+  catch(e){ return {}; }
+}
+function saveGhConfig(cfg){
+  try{ localStorage.setItem(GH_CONFIG_KEY, JSON.stringify(cfg)); }
+  catch(e){ /* storage unavailable */ }
+}
+
+function utf8ToBase64(str){
+  return btoa(encodeURIComponent(str).replace(/%([0-9A-F]{2})/g, (_, p1) => String.fromCharCode('0x' + p1)));
+}
+function base64ToUtf8(b64){
+  return decodeURIComponent(atob(b64).split('').map(c => '%' + c.charCodeAt(0).toString(16).padStart(2,'0')).join(''));
+}
+
+function setGhStatus(msg, isError){
+  ghStatus.textContent = msg;
+  ghStatus.style.color = isError ? 'var(--laravel)' : 'var(--stage2)';
+}
+
+document.getElementById('githubBtn').addEventListener('click', () => {
+  const cfg = loadGhConfig();
+  document.getElementById('ghRepo').value = cfg.repo || '';
+  document.getElementById('ghPath').value = cfg.path || 'php-laravel-edits.json';
+  document.getElementById('ghBranch').value = cfg.branch || 'main';
+  document.getElementById('ghToken').value = cfg.token || '';
+  setGhStatus('');
+  githubOverlay.classList.add('open');
+});
+document.getElementById('githubClose').addEventListener('click', () => githubOverlay.classList.remove('open'));
+githubOverlay.addEventListener('click', (e) => { if(e.target === githubOverlay) githubOverlay.classList.remove('open'); });
+
+document.getElementById('ghSaveSettingsBtn').addEventListener('click', () => {
+  const cfg = {
+    repo: document.getElementById('ghRepo').value.trim(),
+    path: document.getElementById('ghPath').value.trim() || 'php-laravel-edits.json',
+    branch: document.getElementById('ghBranch').value.trim() || 'main',
+    token: document.getElementById('ghToken').value.trim()
+  };
+  saveGhConfig(cfg);
+  setGhStatus('الإعدادات اتحفظت ✓');
+});
+
+async function ghApiUrl(cfg){
+  return `https://api.github.com/repos/${cfg.repo}/contents/${encodeURIComponent(cfg.path).replace(/%2F/g,'/')}`;
+}
+
+async function pushToGithub(){
+  const cfg = loadGhConfig();
+  if(!cfg.repo || !cfg.token){ setGhStatus('حط الـ repo والـ token الأول واحفظهم', true); return; }
+  setGhStatus('بيدفع...');
+  try{
+    const url = await ghApiUrl(cfg);
+    // check if file exists to get its sha (needed to update rather than create)
+    let sha = null;
+    const getRes = await fetch(`${url}?ref=${encodeURIComponent(cfg.branch)}`, {
+      headers: { 'Authorization': `token ${cfg.token}`, 'Accept': 'application/vnd.github+json' }
+    });
+    if(getRes.status === 200){
+      const getData = await getRes.json();
+      sha = getData.sha;
+    } else if(getRes.status !== 404){
+      const errData = await getRes.json().catch(() => ({}));
+      throw new Error(errData.message || `GET failed (${getRes.status})`);
+    }
+
+    const content = utf8ToBase64(JSON.stringify(customEdits, null, 2));
+    const putRes = await fetch(url, {
+      method: 'PUT',
+      headers: {
+        'Authorization': `token ${cfg.token}`,
+        'Accept': 'application/vnd.github+json',
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        message: `Update roadmap edits (${Object.keys(customEdits).length} topics)`,
+        content,
+        branch: cfg.branch,
+        ...(sha ? { sha } : {})
+      })
+    });
+    if(!putRes.ok){
+      const errData = await putRes.json().catch(() => ({}));
+      throw new Error(errData.message || `PUT failed (${putRes.status})`);
+    }
+    setGhStatus(`اتدفع بنجاح ✓ (${Object.keys(customEdits).length} تعديل)`);
+  }catch(err){
+    setGhStatus('فشل الدفع: ' + err.message, true);
+  }
+}
+
+async function pullFromGithub(){
+  const cfg = loadGhConfig();
+  if(!cfg.repo || !cfg.token){ setGhStatus('حط الـ repo والـ token الأول واحفظهم', true); return; }
+  setGhStatus('بيسحب...');
+  try{
+    const url = await ghApiUrl(cfg);
+    const res = await fetch(`${url}?ref=${encodeURIComponent(cfg.branch)}`, {
+      headers: { 'Authorization': `token ${cfg.token}`, 'Accept': 'application/vnd.github+json' }
+    });
+    if(res.status === 404){
+      setGhStatus('الملف ده لسه مش موجود في الريبو، ادفع الأول', true);
+      return;
+    }
+    if(!res.ok){
+      const errData = await res.json().catch(() => ({}));
+      throw new Error(errData.message || `GET failed (${res.status})`);
+    }
+    const data = await res.json();
+    const jsonStr = base64ToUtf8(data.content.replace(/\n/g, ''));
+    const remoteEdits = JSON.parse(jsonStr);
+    customEdits = remoteEdits;
+    saveCustomEdits();
+    setGhStatus(`اتسحب بنجاح ✓ (${Object.keys(customEdits).length} تعديل)`);
+    // refresh currently-open info modal if any
+    if(currentModal.name){
+      renderModalView(currentModal.name, currentModal.pathId);
+    }
+  }catch(err){
+    setGhStatus('فشل السحب: ' + err.message, true);
+  }
+}
+
+document.getElementById('ghPushBtn').addEventListener('click', pushToGithub);
+document.getElementById('ghPullBtn').addEventListener('click', pullFromGithub);
 
 // EXPAND / COLLAPSE ALL
 document.getElementById('expandAllBtn').addEventListener('click', () => {
